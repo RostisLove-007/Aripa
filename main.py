@@ -1,3 +1,5 @@
+import wx
+
 class GridCanvas(wx.Frame):
     def __init__(self, parent, title):
         super(GridCanvas, self).__init__(parent, title=title, size=(400, 400))
