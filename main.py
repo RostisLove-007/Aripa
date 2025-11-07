@@ -26,9 +26,9 @@ class GridCanvas(wx.Frame):
 
         # --- Основные данные ---
         self.div_num = 4
-        self.grid_size = 0  # Будет вычисляться
-        self.canvas_size = 500  # Размер квадратной области
-        self.margin = 50  # Отступ от краёв
+        self.grid_size = 0
+        self.canvas_size = 500
+        self.margin = 50
 
         self.endpoint_points = []
         self.intersection_points = set()
@@ -45,15 +45,11 @@ class GridCanvas(wx.Frame):
         self.control_panel = wx.Panel(self.panel)
         self.control_panel.SetBackgroundColour(wx.Colour(240, 240, 240))
 
-        # Элементы управления
         self.div_label = wx.StaticText(self.control_panel, label="Div Num")
         self.div_text = wx.TextCtrl(self.control_panel, value="4", size=(50, -1))
         self.set_button = wx.Button(self.control_panel, label="Set")
-
-        # Привязка события
         self.set_button.Bind(wx.EVT_BUTTON, self.on_set_div)
 
-        # Layout левой панели
         ctrl_sizer = wx.BoxSizer(wx.VERTICAL)
         ctrl_sizer.Add(self.div_label, 0, wx.ALL | wx.ALIGN_CENTER, 5)
         ctrl_sizer.Add(self.div_text, 0, wx.ALL | wx.EXPAND, 5)
@@ -61,11 +57,9 @@ class GridCanvas(wx.Frame):
         ctrl_sizer.AddStretchSpacer()
         self.control_panel.SetSizer(ctrl_sizer)
 
-        # Основной sizer
         main_sizer = wx.BoxSizer(wx.HORIZONTAL)
         main_sizer.Add(self.control_panel, 0, wx.EXPAND | wx.ALL, 10)
         main_sizer.Add(self.canvas, 1, wx.EXPAND)
-
         self.panel.SetSizer(main_sizer)
 
         # --- События ---
@@ -82,17 +76,15 @@ class GridCanvas(wx.Frame):
         self.canvas.Refresh()
 
     def update_grid_size(self):
-        """Пересчитывает размер ячейки сетки"""
         size = self.canvas.GetSize()
         usable = min(size.width, size.height) - 2 * self.margin
         self.grid_size = usable // self.div_num if self.div_num > 0 else 50
         self.canvas.Refresh()
 
     def on_set_div(self, event):
-        """Обработка кнопки Set"""
         try:
             new_div = int(self.div_text.GetValue())
-            if new_div > 0 and new_div <= 50:  # Ограничение
+            if 1 <= new_div <= 50:
                 self.div_num = new_div
                 self.update_grid_size()
             else:
@@ -101,7 +93,6 @@ class GridCanvas(wx.Frame):
             wx.MessageBox("Введите целое число", "Ошибка", wx.OK | wx.ICON_ERROR)
 
     def get_grid_bounds(self):
-        """Возвращает (left, top, right, bottom) квадратной области сетки"""
         w, h = self.canvas.GetSize()
         size = min(w, h) - 2 * self.margin
         left = (w - size) // 2
@@ -109,7 +100,6 @@ class GridCanvas(wx.Frame):
         return left, top, left + size, top + size
 
     def get_grid_points(self):
-        """Все точки сетки внутри квадрата"""
         left, top, right, bottom = self.get_grid_bounds()
         points = []
         x = left
@@ -124,12 +114,9 @@ class GridCanvas(wx.Frame):
     def get_nearest_point(self, pos):
         x, y = pos
         left, top, right, bottom = self.get_grid_bounds()
-
-        # Ограничиваем зону выбора
         if not (left <= x <= right and top <= y <= bottom):
             return None
 
-        # Ближайшая точка сетки
         gx = left + round((x - left) / self.grid_size) * self.grid_size
         gy = top + round((y - top) / self.grid_size) * self.grid_size
         gx = max(left, min(gx, right))
@@ -164,14 +151,12 @@ class GridCanvas(wx.Frame):
         self.draw_preview_line(dc)
 
     def draw_grid_area(self, dc):
-        """Рамка квадратной области"""
         left, top, right, bottom = self.get_grid_bounds()
         dc.SetPen(wx.Pen(wx.BLACK, 2))
         dc.SetBrush(wx.TRANSPARENT_BRUSH)
         dc.DrawRectangle(left, top, right - left, bottom - top)
 
     def draw_grid_lines(self, dc):
-        """Сетка внутри квадрата"""
         left, top, right, bottom = self.get_grid_bounds()
         dc.SetPen(wx.Pen(wx.Colour(220, 220, 220), 1))
 
@@ -228,14 +213,28 @@ class GridCanvas(wx.Frame):
         if not (left <= point[0] <= right and top <= point[1] <= bottom):
             return
 
+        # === НОВАЯ ЛОГИКА: отмена выбора ===
+        if self.selected_point is not None and point == self.selected_point:
+            # Клик по уже выбранной точке → отменяем выбор
+            self.selected_point = None
+            self.canvas.Refresh()
+            return
+
         if self.selected_point is None:
+            # Выбираем первую точку
             self.selected_point = point
-            if point not in self.endpoint_points and point not in self.intersection_points:
-                self.endpoint_points.append(point)
+            # НЕ добавляем в endpoint_points сразу — только при создании линии
         else:
-            self.lines.append((self.selected_point, point))
-            if point not in self.endpoint_points and point not in self.intersection_points:
-                self.endpoint_points.append(point)
+            # Завершаем линию
+            p1 = self.selected_point
+            p2 = point
+
+            # Добавляем обе точки как конечные (если ещё не добавлены)
+            for p in [p1, p2]:
+                if p not in self.endpoint_points and p not in self.intersection_points:
+                    self.endpoint_points.append(p)
+
+            self.lines.append((p1, p2))
             self.selected_point = None
             self.update_intersections()
 
