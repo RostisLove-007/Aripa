@@ -1,15 +1,13 @@
 """
-Origami Grid Editor — редактор сетки с режимами рисования и удаления.
-Исправлено: удаление одиночных узлов после удаления сегментов.
+Origami Grid Editor — как ORIPA.
+Aux ∩ Aux: кликабельно, невидимо.
+Все невидимые узлы — кликабельны.
 """
 
 import wx
 
 
 def line_intersection(line1, line2):
-    """
-    Вычисляет точку пересечения двух отрезков.
-    """
     x1, y1 = line1[0]
     x2, y2 = line1[1]
     x3, y3 = line2[0]
@@ -31,6 +29,10 @@ class GridCanvas(wx.Frame):
     MODE_INPUT = "input"
     MODE_DELETE = "delete"
 
+    LINE_MOUNTAIN = "mountain"
+    LINE_VALLEY = "valley"
+    LINE_AUX = "aux"
+
     def __init__(self, parent, title):
         super(GridCanvas, self).__init__(parent, title=title, size=(900, 650))
 
@@ -38,13 +40,15 @@ class GridCanvas(wx.Frame):
         self.grid_size = 0
         self.margin = 50
 
-        self.endpoint_points = []      # Только концы существующих линий
-        self.intersection_points = set()  # Только текущие пересечения
+        self.endpoint_points = []
+        self.intersection_points = set()      # Видимые: M/V ∩ M/V
+        self.invisible_intersections = set()  # Невидимые: Aux ∩ (сетка / границы / M/V / Aux)
         self.hover_point = None
         self.selected_point = None
-        self.lines = []
+        self.lines = []  # (p1, p2, type)
 
         self.mode = self.MODE_INPUT
+        self.line_type = self.LINE_MOUNTAIN
         self.hovered_line = None
         self.hovered_segment = None
 
@@ -60,8 +64,16 @@ class GridCanvas(wx.Frame):
         self.radio_delete = wx.RadioButton(self.control_panel, label="DeleteLine")
         self.radio_input.SetValue(True)
 
+        self.radio_mountain = wx.RadioButton(self.control_panel, label="Mountain", style=wx.RB_GROUP)
+        self.radio_valley = wx.RadioButton(self.control_panel, label="Valley")
+        self.radio_aux = wx.RadioButton(self.control_panel, label="Aux")
+        self.radio_mountain.SetValue(True)
+
         self.radio_input.Bind(wx.EVT_RADIOBUTTON, lambda e: self.set_mode(self.MODE_INPUT))
         self.radio_delete.Bind(wx.EVT_RADIOBUTTON, lambda e: self.set_mode(self.MODE_DELETE))
+        self.radio_mountain.Bind(wx.EVT_RADIOBUTTON, lambda e: self.set_line_type(self.LINE_MOUNTAIN))
+        self.radio_valley.Bind(wx.EVT_RADIOBUTTON, lambda e: self.set_line_type(self.LINE_VALLEY))
+        self.radio_aux.Bind(wx.EVT_RADIOBUTTON, lambda e: self.set_line_type(self.LINE_AUX))
 
         self.div_label = wx.StaticText(self.control_panel, label="Div Num")
         self.div_text = wx.TextCtrl(self.control_panel, value="4", size=(50, -1))
@@ -71,6 +83,10 @@ class GridCanvas(wx.Frame):
         ctrl_sizer = wx.BoxSizer(wx.VERTICAL)
         ctrl_sizer.Add(self.radio_input, 0, wx.ALL, 5)
         ctrl_sizer.Add(self.radio_delete, 0, wx.ALL, 5)
+        ctrl_sizer.Add(wx.StaticLine(self.control_panel), 0, wx.EXPAND | wx.ALL, 5)
+        ctrl_sizer.Add(self.radio_mountain, 0, wx.ALL, 5)
+        ctrl_sizer.Add(self.radio_valley, 0, wx.ALL, 5)
+        ctrl_sizer.Add(self.radio_aux, 0, wx.ALL, 5)
         ctrl_sizer.Add(wx.StaticLine(self.control_panel), 0, wx.EXPAND | wx.ALL, 5)
         ctrl_sizer.Add(self.div_label, 0, wx.ALL | wx.ALIGN_CENTER, 5)
         ctrl_sizer.Add(self.div_text, 0, wx.ALL | wx.EXPAND, 5)
@@ -97,6 +113,10 @@ class GridCanvas(wx.Frame):
         self.hovered_segment = None
         self.canvas.Refresh()
 
+    def set_line_type(self, line_type):
+        self.line_type = line_type
+        self.canvas.Refresh()
+
     def on_resize(self, event):
         self.update_grid_size()
         self.canvas.Refresh()
@@ -105,6 +125,7 @@ class GridCanvas(wx.Frame):
         size = self.canvas.GetSize()
         usable = min(size.width, size.height) - 2 * self.margin
         self.grid_size = usable // self.div_num if self.div_num > 0 else 50
+        self.update_all_intersections()
         self.canvas.Refresh()
 
     def on_set_div(self, event):
@@ -151,29 +172,82 @@ class GridCanvas(wx.Frame):
         candidates = [(gx, gy)]
         candidates.extend(self.endpoint_points)
         candidates.extend(self.intersection_points)
+        candidates.extend(self.invisible_intersections)
 
         unique = [p for p in set(candidates) if left <= p[0] <= right and top <= p[1] <= bottom]
         if not unique:
             return (gx, gy)
         return min(unique, key=lambda p: (p[0] - x)**2 + (p[1] - y)**2)
 
-    def update_intersections(self):
-        """Пересчитывает пересечения — только между существующими линиями."""
+    def update_all_intersections(self):
+        """Обновляет ВСЕ пересечения: видимые и невидимые (включая Aux ∩ Aux)"""
         self.intersection_points = set()
-        for i in range(len(self.lines)):
-            for j in range(i + 1, len(self.lines)):
-                inter = line_intersection(self.lines[i], self.lines[j])
-                if inter:
-                    left, top, right, bottom = self.get_grid_bounds()
-                    if left <= inter[0] <= right and top <= inter[1] <= bottom:
-                        self.intersection_points.add(inter)
+        self.invisible_intersections = set()
+
+        left, top, right, bottom = self.get_grid_bounds()
+        bounds = [
+            ((left, top), (right, top)),
+            ((right, top), (right, bottom)),
+            ((right, bottom), (left, bottom)),
+            ((left, bottom), (left, top))
+        ]
+
+        # --- Видимые: M/V ∩ M/V ---
+        mv_lines = [l for l in self.lines if l[2] != self.LINE_AUX]
+        for i in range(len(mv_lines)):
+            for j in range(i + 1, len(mv_lines)):
+                inter = line_intersection(mv_lines[i][:2], mv_lines[j][:2])
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.intersection_points.add(inter)
+
+        # --- Невидимые: Aux ∩ (сетка / границы / M/V / Aux) ---
+        aux_lines = [l for l in self.lines if l[2] == self.LINE_AUX]
+        for aux in aux_lines:
+            p1, p2 = aux[0], aux[1]
+
+            # Сетка
+            y = top + self.grid_size
+            while y < bottom:
+                grid_line = ((left, y), (right, y))
+                inter = line_intersection((p1, p2), grid_line)
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.invisible_intersections.add(inter)
+                y += self.grid_size
+
+            x = left + self.grid_size
+            while x < right:
+                grid_line = ((x, top), (x, bottom))
+                inter = line_intersection((p1, p2), grid_line)
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.invisible_intersections.add(inter)
+                x += self.grid_size
+
+            # Границы
+            for b1, b2 in bounds:
+                inter = line_intersection((p1, p2), (b1, b2))
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.invisible_intersections.add(inter)
+
+            # M/V
+            for mv in mv_lines:
+                inter = line_intersection((p1, p2), mv[:2])
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.invisible_intersections.add(inter)
+
+            # Aux ∩ Aux
+            for other_aux in aux_lines:
+                if other_aux is aux:
+                    continue
+                inter = line_intersection((p1, p2), other_aux[:2])
+                if inter and left <= inter[0] <= right and top <= inter[1] <= bottom:
+                    self.invisible_intersections.add(inter)
 
     def update_endpoint_points(self):
-        """Пересобирает endpoint_points — только концы активных линий."""
         used = set()
         for line in self.lines:
-            used.add(line[0])
-            used.add(line[1])
+            if line[2] != self.LINE_AUX:
+                used.add(line[0])
+                used.add(line[1])
         self.endpoint_points = list(used)
 
     def get_closest_line_and_segment(self, pos):
@@ -181,11 +255,11 @@ class GridCanvas(wx.Frame):
         min_dist = float('inf')
         result = None
 
-        for idx, line in enumerate(self.lines):
-            p1, p2 = line
+        for idx, (p1, p2, ltype) in enumerate(self.lines):
             points_on_line = [p1, p2]
-            for inter in self.intersection_points:
-                if self.is_point_on_segment(inter, line, tol=1e-5):
+            inter_set = self.intersection_points if ltype != self.LINE_AUX else self.invisible_intersections
+            for inter in inter_set:
+                if self.is_point_on_segment(inter, (p1, p2), tol=1e-5):
                     points_on_line.append(inter)
 
             points_on_line = sorted(set(points_on_line), key=lambda pt: (pt[0], pt[1]))
@@ -238,35 +312,28 @@ class GridCanvas(wx.Frame):
         return abs(p1[0] - p2[0]) < tol and abs(p1[1] - p2[1]) < tol
 
     def remove_line_segment(self, line_idx, seg_start, seg_end):
-        """
-        Удаляет сегмент (seg_start → seg_end).
-        Если узел становится изолированным — он исчезает.
-        """
         line = self.lines[line_idx]
-        p1, p2 = line
+        p1, p2, ltype = line
 
-        # Все точки на линии
         points_on_line = [p1, p2]
-        for inter in self.intersection_points:
-            if self.is_point_on_segment(inter, line, tol=1e-5):
+        inter_set = self.intersection_points if ltype != self.LINE_AUX else self.invisible_intersections
+        for inter in inter_set:
+            if self.is_point_on_segment(inter, (p1, p2), tol=1e-5):
                 points_on_line.append(inter)
         points_on_line = sorted(set(points_on_line), key=lambda pt: (pt[0], pt[1]))
 
-        # Индексы начала и конца удаляемого сегмента
         start_idx = next((i for i, pt in enumerate(points_on_line) if self.points_equal(pt, seg_start)), -1)
         end_idx = next((i for i, pt in enumerate(points_on_line) if self.points_equal(pt, seg_end)), -1)
 
         if start_idx == -1 or end_idx == -1:
             return
 
-        # Новые линии (без удалённого сегмента)
         new_lines = []
         if start_idx > 0:
-            new_lines.append((points_on_line[0], points_on_line[start_idx]))
+            new_lines.append((points_on_line[0], points_on_line[start_idx], ltype))
         if end_idx < len(points_on_line) - 1:
-            new_lines.append((points_on_line[end_idx], points_on_line[-1]))
+            new_lines.append((points_on_line[end_idx], points_on_line[-1], ltype))
 
-        # Замена
         if new_lines:
             self.lines[line_idx] = new_lines[0]
             if len(new_lines) > 1:
@@ -274,9 +341,8 @@ class GridCanvas(wx.Frame):
         else:
             del self.lines[line_idx]
 
-        # КРИТИЧНО: пересчёт точек и пересечений
         self.update_endpoint_points()
-        self.update_intersections()
+        self.update_all_intersections()
 
     def on_mouse_move(self, event):
         pos = event.GetPosition()
@@ -317,12 +383,11 @@ class GridCanvas(wx.Frame):
             else:
                 p1 = self.selected_point
                 p2 = point
-                for p in [p1, p2]:
-                    if p not in self.endpoint_points:
-                        self.endpoint_points.append(p)
-                self.lines.append((p1, p2))
+                self.lines.append((p1, p2, self.line_type))
                 self.selected_point = None
-                self.update_intersections()
+                self.update_all_intersections()
+                if self.line_type != self.LINE_AUX:
+                    self.update_endpoint_points()
 
         elif self.mode == self.MODE_DELETE and self.hovered_segment:
             idx = self.hovered_line
@@ -337,11 +402,12 @@ class GridCanvas(wx.Frame):
         dc = wx.PaintDC(self.canvas)
         self.draw_grid_area(dc)
         self.draw_grid_lines(dc)
-        self.draw_lines(dc)
+        self.draw_aux_lines(dc)
+        self.draw_main_lines(dc)
         self.draw_hovered_segment(dc)
 
         if self.mode == self.MODE_INPUT:
-            self.draw_red_points(dc)
+            self.draw_black_points(dc)
             self.draw_hover_point(dc)
             self.draw_preview_line(dc)
             self.draw_coordinates(dc)
@@ -364,10 +430,21 @@ class GridCanvas(wx.Frame):
             dc.DrawLine(left, y, right, y)
             y += self.grid_size
 
-    def draw_lines(self, dc):
-        dc.SetPen(wx.Pen(wx.Colour(255, 0, 0), 2))
-        for line in self.lines:
-            dc.DrawLine(int(line[0][0]), int(line[0][1]), int(line[1][0]), int(line[1][1]))
+    def draw_aux_lines(self, dc):
+        dc.SetPen(wx.Pen(wx.Colour(180, 180, 180), 1))
+        for p1, p2, ltype in self.lines:
+            if ltype == self.LINE_AUX:
+                dc.DrawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
+
+    def draw_main_lines(self, dc):
+        for p1, p2, ltype in self.lines:
+            if ltype == self.LINE_MOUNTAIN:
+                dc.SetPen(wx.Pen(wx.Colour(255, 0, 0), 2))
+            elif ltype == self.LINE_VALLEY:
+                dc.SetPen(wx.Pen(wx.Colour(0, 0, 255), 2))
+            else:
+                continue
+            dc.DrawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
 
     def draw_hovered_segment(self, dc):
         if self.mode == self.MODE_DELETE and self.hovered_segment:
@@ -375,13 +452,14 @@ class GridCanvas(wx.Frame):
             dc.SetPen(wx.Pen(wx.Colour(0, 255, 0), 3))
             dc.DrawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
 
-    def draw_red_points(self, dc):
-        dc.SetBrush(wx.Brush(wx.Colour(255, 0, 0)))
-        dc.SetPen(wx.Pen(wx.Colour(255, 0, 0), 1))
+    def draw_black_points(self, dc):
+        dc.SetBrush(wx.Brush(wx.BLACK))
+        dc.SetPen(wx.Pen(wx.BLACK, 1))
         for p in self.endpoint_points:
             dc.DrawCircle(int(p[0]), int(p[1]), 3)
         for p in self.intersection_points:
             dc.DrawCircle(int(p[0]), int(p[1]), 3)
+        # НЕ рисуем invisible_intersections!
 
     def draw_hover_point(self, dc):
         if self.hover_point:
@@ -392,7 +470,10 @@ class GridCanvas(wx.Frame):
 
     def draw_preview_line(self, dc):
         if self.selected_point and self.hover_point:
-            dc.SetPen(wx.Pen(wx.Colour(255, 0, 0), 2, wx.PENSTYLE_DOT))
+            color = wx.Colour(255, 0, 0) if self.line_type == self.LINE_MOUNTAIN else \
+                    wx.Colour(0, 0, 255) if self.line_type == self.LINE_VALLEY else \
+                    wx.Colour(180, 180, 180)
+            dc.SetPen(wx.Pen(color, 2, wx.PENSTYLE_DOT))
             sp = self.selected_point
             hp = self.hover_point
             dc.DrawLine(int(sp[0]), int(sp[1]), int(hp[0]), int(hp[1]))
